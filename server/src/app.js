@@ -1,11 +1,16 @@
 import express from 'express'; 
 import { randomUUID } from 'node:crypto'; 
 import pool from './db/pool.js'; 
-  
+import cors from 'cors';
+
 const app = express(); 
 const PORT = 3000; 
-  
-app.use(express.json()); 
+
+app.use(cors({ 
+  origin: 'http://localhost:5173', 
+}));
+
+app.use(express.json());
   
 const allowedStatuses = [ 
   'Нужно сделать', 
@@ -315,7 +320,7 @@ app.delete('/api/tasks/:id', async (req, res, next) => {
     next(error); 
   } 
 }); 
-  
+
 app.use((req, res) => { 
   res.status(404).json({ 
     message: 'Endpoint не найден', 
