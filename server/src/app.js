@@ -2,15 +2,42 @@ import express from 'express';
 import { randomUUID } from 'node:crypto'; 
 import pool from './db/pool.js'; 
 import cors from 'cors';
+import session from 'express-session'; 
+import connectPgSimple from 'connect-pg-simple'; 
+import bcrypt from 'bcrypt'; 
+import { requireAuth } from './middleware/requireAuth.js'; 
 
 const app = express(); 
 const PORT = 3000; 
 
 app.use(cors({ 
   origin: 'http://localhost:5173', 
+  credentials: true,
 }));
 
 app.use(express.json());
+
+const PgSession = connectPgSimple(session); 
+  
+app.use( 
+  session({ 
+    store: new PgSession({ 
+      pool, 
+      tableName: 'user_sessions', 
+      createTableIfMissing: true, 
+    }), 
+    secret: process.env.SESSION_SECRET, 
+    resave: false, 
+    saveUninitialized: false, 
+    cookie: { 
+      httpOnly: true, 
+      sameSite: 'lax', 
+      secure: false, 
+      maxAge: 1000 * 60 * 60 * 24 * 7, 
+    }, 
+  }) 
+);
+
   
 const allowedStatuses = [ 
   'Нужно сделать', 
@@ -75,6 +102,149 @@ function validateTask(data, partial = false) {
   
   return errors; 
 } 
+
+async function getUserProfile(userId) { 
+  const result = await pool.query( 
+    `SELECT 
+       u.id, 
+       u.name, 
+       u.email, 
+       u.created_at AS "createdAt", 
+       COUNT(t.id)::int AS "taskCount" 
+     FROM users u 
+     LEFT JOIN tasks t ON t.user_id = u.id 
+     WHERE u.id = $1 
+     GROUP BY u.id`, 
+    [userId] 
+  ); 
+  
+  return result.rows[0] || null; 
+}
+
+app.post('/api/auth/register', async (req, res, next) => { 
+  try { 
+    const name = req.body.name?.trim(); 
+    const email = req.body.email?.trim().toLowerCase(); 
+    const password = req.body.password; 
+  
+    if (!name || name.length < 2) { 
+      return res.status(400).json({ 
+        message: 'Имя должно содержать минимум 2 символа', 
+      }); 
+    } 
+  
+    if (!email || !email.includes('@')) { 
+      return res.status(400).json({ 
+        message: 'Укажите корректный email', 
+      }); 
+    } 
+  
+    if (!password || password.length < 8) { 
+      return res.status(400).json({ 
+        message: 'Пароль должен содержать минимум 8 символов', 
+      }); 
+    } 
+  
+    const passwordHash = await bcrypt.hash(password, 12); 
+    const userId = randomUUID(); 
+ 
+  
+    await pool.query( 
+      `INSERT INTO users (id, name, email, password_hash) 
+       VALUES ($1, $2, $3, $4)`, 
+      [userId, name, email, passwordHash] 
+    ); 
+  
+    req.session.userId = userId; 
+  
+    const user = await getUserProfile(userId); 
+    res.status(201).json(user); 
+  } catch (error) { 
+
+    if (error.code === '23505') { 
+      return res.status(409).json({ 
+        message: 'Пользователь с таким email уже существует', 
+      }); 
+    } 
+  
+    next(error); 
+  } 
+});
+
+app.post('/api/auth/login', async (req, res, next) => { 
+  try { 
+    const email = req.body.email?.trim().toLowerCase(); 
+    const password = req.body.password; 
+  
+    if (!email || !password) { 
+      return res.status(400).json({ 
+        message: 'Укажите email и пароль', 
+      }); 
+    } 
+  
+    const result = await pool.query( 
+      `SELECT id, name, email, password_hash 
+       FROM users 
+       WHERE email = $1`, 
+      [email] 
+    ); 
+  
+    const user = result.rows[0]; 
+  
+    if (!user) { 
+      return res.status(401).json({ 
+        message: 'Неверный email или пароль', 
+      }); 
+    } 
+ 
+  
+    const passwordMatches = await bcrypt.compare( 
+      password, 
+      user.password_hash 
+    ); 
+  
+    if (!passwordMatches) { 
+      return res.status(401).json({ 
+        message: 'Неверный email или пароль', 
+      }); 
+    } 
+  
+    req.session.userId = user.id; 
+  
+    const profile = await getUserProfile(user.id); 
+    res.json(profile); 
+  } catch (error) { 
+    next(error); 
+  } 
+}); 
+
+app.post('/api/auth/logout', (req, res, next) => { 
+  req.session.destroy((error) => { 
+ 
+    if (error) { 
+      return next(error); 
+    } 
+  
+    res.clearCookie('connect.sid'); 
+    res.status(204).end(); 
+  }); 
+});
+
+app.get('/api/auth/me', requireAuth, async (req, res, next) => { 
+  try { 
+    const user = await getUserProfile(req.session.userId); 
+  
+    if (!user) { 
+      return res.status(401).json({ 
+        message: 'Сессия пользователя недействительна', 
+      }); 
+    } 
+  
+    res.json(user); 
+  } catch (error) { 
+    next(error); 
+  } 
+});
   
 app.get('/api/health', async (req, res, next) => { 
   try { 
@@ -92,27 +262,26 @@ app.get('/api/health', async (req, res, next) => {
     next(error); 
   } 
 }); 
-  
+
 app.get('/api/tasks', async (req, res, next) => { 
   try { 
     const { status, priority } = req.query; 
   
     const result = await pool.query( 
       `SELECT 
-         id, 
-         title, 
-         project, 
-         status, 
-         priority, 
-         due_date::text AS "dueDate", 
-         created_at AS "createdAt", 
-         updated_at AS "updatedAt" 
-       FROM tasks 
-       WHERE ($1::text IS NULL OR status = $1) 
-         AND ($2::text IS NULL OR priority = $2) 
-       ORDER BY created_at DESC`, 
-      [status ?? null, priority ?? null] 
- 
+        id, 
+        title, 
+        project, 
+        status, 
+        priority, 
+        due_date::text AS "dueDate", 
+        created_at AS "createdAt", 
+        updated_at AS "updatedAt" 
+      FROM tasks 
+    
+      WHERE user_id = $1 
+      ORDER BY created_at DESC`, 
+      [req.session.userId] 
     ); 
   
     res.json(result.rows); 
@@ -131,19 +300,18 @@ app.get('/api/tasks/:id', async (req, res, next) => {
   
     const result = await pool.query( 
       `SELECT 
-         id, 
-         title, 
-         project, 
-         status, 
-         priority, 
-         due_date::text AS "dueDate", 
-         created_at AS "createdAt", 
-         updated_at AS "updatedAt" 
-       FROM tasks 
-       WHERE id = $1`, 
- 
-      [req.params.id] 
-    ); 
+        id, 
+        title, 
+        project, 
+        status, 
+        priority, 
+        due_date::text AS "dueDate", 
+        created_at AS "createdAt", 
+        updated_at AS "updatedAt" 
+      FROM tasks 
+      WHERE id = $1 AND user_id = $2`, 
+      [req.params.id, req.session.userId] 
+    );
   
     if (result.rowCount === 0) { 
       return res.status(404).json({ 
@@ -169,36 +337,39 @@ app.post('/api/tasks', async (req, res, next) => {
     const status = req.body.status ?? 'Нужно сделать'; 
     const priority = req.body.priority ?? 'Средний'; 
     const dueDate = req.body.dueDate || null; 
-  
- 
+    const title = req.body.title;
+    const project = req.body.project;
+    
     const result = await pool.query( 
       `INSERT INTO tasks ( 
-         id, 
-         title, 
-         project, 
-         status, 
-         priority, 
-         due_date 
-       ) 
-       VALUES ($1, $2, $3, $4, $5, $6) 
-       RETURNING 
-         id, 
-         title, 
-         project, 
-         status, 
-         priority, 
-         due_date::text AS "dueDate", 
-         created_at AS "createdAt", 
-         updated_at AS "updatedAt"`, 
-      [ 
         id, 
-        req.body.title.trim(), 
-        req.body.project.trim(), 
+        user_id, 
+        title, 
+        project, 
         status, 
         priority, 
-        dueDate, 
+        due_date 
+      ) 
+      VALUES ($1, $2, $3, $4, $5, $6, $7) 
+      RETURNING 
+        id, 
+        title, 
+        project, 
+        status, 
+        priority, 
+        due_date::text AS "dueDate", 
+        created_at AS "createdAt", 
+        updated_at AS "updatedAt"`, 
+      [ 
+        id, 
+        req.session.userId, 
+        title, 
+        project, 
+        status, 
+        priority, 
+        dueDate || null, 
       ] 
-    ); 
+    );
  
   
     res.status(201).json(result.rows[0]); 
@@ -304,9 +475,11 @@ app.delete('/api/tasks/:id', async (req, res, next) => {
     } 
   
     const result = await pool.query( 
-      'DELETE FROM tasks WHERE id = $1', 
-      [req.params.id] 
-    ); 
+      `DELETE FROM tasks 
+      WHERE id = $1 AND user_id = $2 
+      RETURNING id`, 
+      [req.params.id, req.session.userId] 
+    );  
   
     if (result.rowCount === 0) { 
       return res.status(404).json({ 

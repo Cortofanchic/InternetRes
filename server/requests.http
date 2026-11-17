@@ -62,3 +62,22 @@ GET {{baseUrl}}/api/tasks/00000000-0000-4000-8000-000000000000
   
 ### Ошибка 404: неизвестный endpoint 
 GET {{baseUrl}}/api/unknown 
+
+### Регистрация 
+POST {{baseUrl}}/api/auth/register 
+Content-Type: application/json 
+
+{ 
+  "name": "Алексей", 
+  "email": "alexey@example.com", 
+  "password": "password123" 
+} 
+  
+### Текущий пользователь 
+GET {{baseUrl}}/api/auth/me 
+  
+### Задачи текущего пользователя 
+GET {{baseUrl}}/api/tasks 
+  
+### Выход 
+POST {{baseUrl}}/api/auth/logout 
