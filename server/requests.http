@@ -80,4 +80,16 @@ GET {{baseUrl}}/api/auth/me
 GET {{baseUrl}}/api/tasks 
   
 ### Выход 
-POST {{baseUrl}}/api/auth/logout 
+POST {{baseUrl}}/api/auth/logout
+
+### Неверный статус 
+POST {{baseUrl}}/api/tasks 
+Content-Type: application/json 
+  
+{ 
+  "title": "Проверить финальную версию", 
+  "project": "TaskFlow", 
+  "status": "Когда-нибудь", 
+  "priority": "Высокий", 
+  "dueDate": "2026-10-01" 
+}
