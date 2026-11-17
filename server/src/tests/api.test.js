@@ -105,4 +105,15 @@ describe('TaskFlow API', () => {
     expect(response.body.message).toBeTruthy();
     expect(typeof response.body.message).toBe('string');
   });
+
+  test('неправильный пароль 401', async () => {
+    const response = await agent 
+      .post('/api/auth/login') 
+      .send({ 
+        email: testEmail, 
+        password: 'wrong_password', 
+      }); 
+  
+    expect(response.status).toBe(401); 
+  });
 });
